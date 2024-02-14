@@ -6,8 +6,6 @@ import socket
 import socketserver
 import ssl
 import threading
-import time
-from urllib.error import HTTPError
 
 import requests
 from cryptography import x509
@@ -17,26 +15,28 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from requests import get
 
-from mylogger import logger
+from mylogger import logger, logging
 
 
 class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def __init__(self, target_host, target_port, *args, **kwargs):
         self.target_host = target_host
         self.target_port = target_port
+        self.session = requests.Session()
         super().__init__(*args, **kwargs)
 
     def do_request(self):
         target_url = f"http://{self.target_host}:{self.target_port}{self.path}"
-        logger.debug(target_url)
+        # logger.debug(target_url)
         method = self.command.lower()
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         headers = self.headers
+        # logger.debug(headers) # NOTE: worked with this enabled?!?!
+
         try:
             response = requests.request(
                 method, target_url, data=data, headers=headers, allow_redirects=False
             )
-            print(response)
             if 300 <= response.status_code < 400:
                 # Redirect response, send appropriate status code and location header
                 self.send_response(response.status_code)
@@ -152,6 +152,9 @@ def get_local_ips():
 
 
 def run_proxy(host, http_port, https_port, stop_event):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("socketserver").setLevel(logging.WARNING)
     if not check_port(host, http_port):
         print(f"No application running on {host}:{http_port}. Skipping proxy setup.")
         return
