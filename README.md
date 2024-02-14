@@ -1,3 +1,10 @@
+# NOTE
+I have modified this so that it can handle subdomains, assuming they're redirected to the host.
+Also it handles redirects better. Not a single file any more, though.
+
+
+Below is Ark's original Readme:
+# ORIGINAL README
 This script is a reverse proxy server that allows you to forward requests from one web server to another. It is designed to provide a secure way of accessing web applications that are hosted on an internal network, by creating an encrypted connection between the client and the proxy server.
 
 The proxy server can handle HTTP and HTTPS requests, and supports various HTTP methods such as GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS, and CONNECT. It also includes error handling to provide informative error messages when things go wrong.
@@ -21,5 +28,5 @@ List of commands:
     ("- add <Host> <HttpPort> <HttpsPort>: Add a new proxy.")
     ("- edit <ID> <Host> <HttpPort> <HttpsPort>: Edit an existing proxy.")
     ("- delete <ID>: Delete a specific proxy.")
-    ("- help: Displays available commands.") 
-    ("- exit: Stop all proxies and exit.")  
+    ("- help: Displays available commands.")
+    ("- exit: Stop all proxies and exit.")

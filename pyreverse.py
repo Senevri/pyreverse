@@ -116,7 +116,7 @@ def proxy_cli(proxies):
             if len(cmd) >= 4:
                 host, http_port, https_port = cmd[1], int(cmd[2]), int(cmd[3])
                 if len(cmd) == 5:
-                    mapping = cmd[4] or "/"
+                    mapping = cmd[4] or None
                 if not valid_ip(host):
                     print("Invalid IP address.")
                 elif not valid_port(http_port) or not valid_port(https_port):
@@ -335,7 +335,7 @@ if __name__ == "__main__":
         host = config[section]["Host"]
         http_port = int(config[section]["HttpPort"])
         https_port = int(config[section]["HttpsPort"])
-        mapping = config[section]["Mapping"]
+        mapping = config[section].get("mapping")
 
         proxy = Proxy(host, http_port, https_port, mapping)
         proxies.append(proxy)

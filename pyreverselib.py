@@ -6,6 +6,8 @@ import socket
 import socketserver
 import ssl
 import threading
+import yaml
+
 
 import requests
 from cryptography import x509
@@ -19,15 +21,32 @@ from mylogger import logger, logging
 
 
 class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
-    def __init__(self, target_host, target_port, *args, **kwargs):
+    def __init__(self, target_host, target_port, target_mappings, *args, **kwargs):
         self.target_host = target_host
         self.target_port = target_port
+        self.target_mappings = target_mappings
         self.session = requests.Session()
         super().__init__(*args, **kwargs)
 
+    def get_target(self):
+        requested_host = self.headers.get("Host", "")
+        logger.debug((requested_host, self.target_mappings))
+        host, port = (self.target_host, self.target_port)
+        # Logic to determine the target host based on the requested host
+        if self.target_mappings:
+            for subdomain in self.target_mappings:
+                logger.debug(subdomain)
+                if requested_host.startswith(f"{str.lower(subdomain)}."):
+                    logger.debug("found mapping")
+                    host, port = self.target_mappings[subdomain].values()
+                    break
+                # Default to a fallback host if no matching virtual host is found
+        return [host, port]
+
     def do_request(self):
-        target_url = f"http://{self.target_host}:{self.target_port}{self.path}"
-        # logger.debug(target_url)
+        target_host, target_port = self.get_target()
+        target_url = f"http://{target_host}:{target_port}{self.path}"
+        logger.debug(target_url)
         method = self.command.lower()
         data = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         headers = self.headers
@@ -51,24 +70,15 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         except requests.RequestException as e:
             self.send_error(500, str(e))
 
-    def debug_http_response(self, response):
-        logger.debug(response.status)
-        for header, value in response.getheaders():
-            logger.debug(f"{header}: {value}")
-        logger.debug("Content:")
-        content = response.read()
-        logger.debug(content.decode("utf-8"))  # Assuming content is text, adjust decoding as needed
-
     def _send_response_and_write_file(self, response):
-        # self.debug_http_response(response)
         self.send_response(response.status)
-        self.send_header("Access-Control-Allow-Origin", "*")  # Allow requests from any origin
-        self.send_header(
-            "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
-        )
-        self.send_header(
-            "Access-Control-Allow-Headers", "Content-Type, Authorization"
-        )  # Include any other headers as needed
+        # self.send_header("Access-Control-Allow-Origin", "*")  # Allow requests from any origin
+        # self.send_header(
+        #     "Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS"
+        # )
+        # self.send_header(
+        #     "Access-Control-Allow-Headers", "Content-Type, Authorization"
+        # )  # Include any other headers as needed
         for key, value in response.getheaders():
             self.send_header(key, value)
         self.end_headers()
@@ -99,6 +109,13 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         self.do_request()
 
 
+def load_mappings(filename):
+    logger.debug(filename)
+    with open(filename, "r") as f:
+        mappings = yaml.safe_load(f)
+    return mappings
+
+
 class Proxy:
     def __init__(self, host, http_port, https_port, mapping):
         self.host = host
@@ -108,12 +125,16 @@ class Proxy:
         self.proxy_thread = None
         self.running = False
         self.mapping = mapping
+        if mapping:
+            self.mappings = load_mappings(mapping)
+            logger.debug(self.mappings)
 
     def start(self):
         if not self.running:
             self.stop_event.clear()
             self.proxy_thread = threading.Thread(
-                target=run_proxy, args=(self.host, self.http_port, self.https_port, self.stop_event)
+                target=run_proxy,
+                args=(self.host, self.http_port, self.https_port, self.mappings, self.stop_event),
             )
             self.proxy_thread.start()
             self.running = True
@@ -124,6 +145,23 @@ class Proxy:
             assert self.proxy_thread
             self.proxy_thread.join()
             self.running = False
+
+
+def check_mappings(mappings):
+    service_status = {}
+
+    for service, details in mappings.items():
+        addr = details.get("addr")
+        port = details.get("port")
+
+        assert addr and port
+
+        # Check if the port is available
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            result = sock.connect_ex((addr, port))
+            service_status[service] = result == 0
+
+    return service_status
 
 
 def check_port(host, port):
@@ -151,13 +189,16 @@ def get_local_ips():
     return list(set(local_ips))
 
 
-def run_proxy(host, http_port, https_port, stop_event):
+def run_proxy(host, http_port, https_port, mappings, stop_event):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("socketserver").setLevel(logging.WARNING)
+
+    # TODO: Check for mappings services
     if not check_port(host, http_port):
-        print(f"No application running on {host}:{http_port}. Skipping proxy setup.")
-        return
+        if not all(check_mappings(mappings)):
+            print(f"No application running on {host}:{http_port}. Skipping proxy setup.")
+            return
 
     cert_dir = os.path.join("certificates", str(https_port))
     cert_file = os.path.join(cert_dir, "cert.pem")
@@ -214,7 +255,7 @@ def run_proxy(host, http_port, https_port, stop_event):
                 )
             )
 
-    HandlerClass = functools.partial(ReverseProxyHTTPRequestHandler, host, http_port)
+    HandlerClass = functools.partial(ReverseProxyHTTPRequestHandler, host, http_port, mappings)
     httpd = socketserver.TCPServer(("0.0.0.0", https_port), HandlerClass)  # Bind to all interfaces
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert_file, key_file)
