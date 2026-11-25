@@ -1,4 +1,3 @@
-import ipaddress
 import datetime
 import functools
 import http.server
@@ -9,11 +8,6 @@ import ssl
 import threading
 import yaml
 from urllib.parse import urlparse, urlsplit, urlunsplit
-
-import httpx2
-
-
-import atexit
 
 import httpx2
 from cryptography import x509
@@ -50,16 +44,18 @@ WEBSOCKET_EXCLUDED = {
     }
 
 
+
 class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+    timeout=60
     protocol_version = "HTTP/1.1"
     # Keep-alive by default; the WebSocket path sets this True before handing
     # the connection to its bridge thread so the socket is not reused or closed
     # by BaseHTTPRequestHandler.
     close_connection = False
 
-    # Shared by every thread created by this process: marks worker threads so
-    # atexit handlers (ssl encryption-shutdown teardown) can wait for them.
-    _PROXY_THREADS = []
+    # # Shared by every thread created by this process: marks worker threads so
+    # # atexit handlers (ssl encryption-shutdown teardown) can wait for them.
+    # _PROXY_THREADS = []
 
     def __init__(self, target_host, target_port, target_mappings, *args, **kwargs):
         self.target_host = target_host
@@ -70,7 +66,10 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         # loopback/LAN link and must never be hijacked by HTTP(S)_PROXY
         # environment variables (a stray system proxy would swallow or alter
         # upstream requests, e.g. WebSocket upgrades).
-        self.session = httpx2.Client(trust_env=False)
+        self.session = httpx2.Client(
+            trust_env=False,
+            timeout=httpx2.Timeout(connect=5.0, read=120.0, write=30.0, pool=None),
+            )
         super().__init__(*args, **kwargs)
 
 
@@ -119,9 +118,10 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
 
     def do_request(self):
-        logger.info("conn=%s thread=%s %s %s CL=%r TE=%r",
-            id(self.connection), threading.get_ident(), self.command, self.path,
-            self.headers.get("Content-Length"), self.headers.get("Transfer-Encoding"))
+        # logger.info("conn=%s thread=%s %s %s CL=%r TE=%r",
+        #     id(self.connection), threading.get_ident(), self.command, self.path,
+        #     self.headers.get("Content-Length"), self.headers.get("Transfer-Encoding"))
+        self.server.request_started(self.connection) #type:ignore
         try:
             logger.debug(
                 "REQUEST %s %s Upgrade=%r Connection=%r",
@@ -142,14 +142,12 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             logger.debug("Client disconnected during request processing: %s", e)
         except Exception as e:
             logger.exception("Error processing request: %s", e)
-
-
-        #self.rewrite_location(request_headers["Location"])
+        finally:
+            self.server.request_done(self.connection)
+            if self.server.draining.is_set():
+                self.close_connection = True
 
     def do_websocket(self):
-        import socket
-        import threading
-
         from wsproto import WSConnection, ConnectionType
         from wsproto.events import (
             Request, AcceptConnection, TextMessage, BytesMessage,
@@ -163,12 +161,7 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         target_host, target_port = self.get_target()
         target_url = f"ws://{target_host}:{target_port}{self.path}"
 
-        excluded_headers = {
-            "host", "connection", "upgrade",
-            "sec-websocket-key", "sec-websocket-version",
-            "sec-websocket-extensions", "sec-websocket-protocol",
-            "content-length", "transfer-encoding",
-        }
+        excluded_headers = WEBSOCKET_EXCLUDED
 
         headers = {
             key: value
@@ -293,6 +286,16 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
                     upstream.subprotocol,
                 )
 
+                def closer():
+                    close_client()
+                    try:
+                        upstream.close()
+                    except Exception:
+                        pass
+
+                with self.server._lock:
+                    self.server._ws_closers.add(closer)
+
                 sender = threading.Thread(
                     target=client_to_upstream,
                     args=(upstream,),
@@ -333,19 +336,19 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             if not self.close_connection:
                 raise
 
-    def _send_upstream_headers(self, response, body_len):
-        """Write the status line and headers for a fully-buffered body of
-        ``body_len`` bytes, with Content-Length computed to match."""
-        self.send_response(response.status_code)
-        for key, value in response.headers.multi_items():
-            lk = key.lower()
-            if lk in HOP_BY_HOP_HEADERS or lk in ("content-length", "content-encoding", "server", "date"):
-                continue
-            if lk in ("location", "content-location"):
-                value = self.rewrite_location(value)
-            self.send_header(key, value)
-        self.send_header("Content-Length", str(body_len))
-        self.end_headers()
+    # def _send_upstream_headers(self, response, body_len):
+    #     """Write the status line and headers for a fully-buffered body of
+    #     ``body_len`` bytes, with Content-Length computed to match."""
+    #     self.send_response(response.status_code)
+    #     for key, value in response.headers.multi_items():
+    #         lk = key.lower()
+    #         if lk in HOP_BY_HOP_HEADERS or lk in ("content-length", "content-encoding", "server", "date"):
+    #             continue
+    #         if lk in ("location", "content-location"):
+    #             value = self.rewrite_location(value)
+    #         self.send_header(key, value)
+    #     self.send_header("Content-Length", str(body_len))
+    #     self.end_headers()
 
     def _build_headers(self):
         # Drop hop-by-hop headers and Content-Length (httpx recomputes it
@@ -500,7 +503,6 @@ class ReverseProxyHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
 
 
 def load_mappings(filename):
-    logger.debug(filename)
     with open(filename, "r") as f:
         mappings = yaml.safe_load(f)
     return mappings
@@ -516,9 +518,10 @@ class Proxy:
         self.running = False
         self.mapping = mapping
         self.local_ips = get_local_ips()
+        self.mappings={}
         if mapping:
             self.mappings = load_mappings(mapping)
-            logger.debug(self.mappings)
+            # logger.debug(self.mappings)
 
     def start(self):
         if not self.running:
@@ -544,10 +547,11 @@ class Proxy:
                     "THREAD name=%s ident=%s daemon=%s alive=%s",
                     t.name, t.ident, t.daemon, t.is_alive()
                     )
-            #import faulthandler
-            #import sys
+            if self.proxy_thread.is_alive():
+                import faulthandler, sys
+                logger.warning("Proxy thread did not stop; dumping stacks")
+                faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
 
-            #faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
             self.running = False
 
 def check_mappings(mappings):
@@ -595,9 +599,9 @@ def get_local_ips():
 
 def make_private_key(key_file, cert_file):
 
-    print("Generating SSL certificate and key...")
-    print(f"Certificate path: {cert_file}")
-    print(f"Key path: {key_file}")
+    logger.info("Generating SSL certificate and key...")
+    logger.info(f"Certificate path: {cert_file}")
+    logger.info(f"Key path: {key_file}")
 
     private_key = rsa.generate_private_key(
         public_exponent=65537, key_size=2048, backend=default_backend()
@@ -651,49 +655,76 @@ def make_private_key(key_file, cert_file):
 
 
 
+import time
+
+def _hard_close(conn):
+    for fn in (lambda: conn.shutdown(socket.SHUT_RDWR), conn.close):
+        try:
+            fn()
+        except OSError:
+            pass
+
+
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # no allow_reuse_address: on Windows it lets a second instance share the port
 
     def __init__(self, *args, **kwargs):
-        self.active_requests = set()
-        self.active_requests_lock = threading.Lock()
+        self.draining = threading.Event()
+        self._lock = threading.Lock()
+        self._conns = set()        # every open client socket
+        self._busy = set()         # sockets with a request in flight
+        self._ws_closers = set()   # callables that end live websocket bridges
         super().__init__(*args, **kwargs)
 
     def process_request(self, request, client_address):
-        with self.active_requests_lock:
-            self.active_requests.add(request)
-
+        with self._lock:
+            self._conns.add(request)
         try:
             super().process_request(request, client_address)
         except Exception:
-            with self.active_requests_lock:
-                self.active_requests.discard(request)
+            with self._lock:
+                self._conns.discard(request)
             raise
 
     def process_request_thread(self, request, client_address):
         try:
             super().process_request_thread(request, client_address)
         finally:
-            with self.active_requests_lock:
-                self.active_requests.discard(request)
+            with self._lock:
+                self._conns.discard(request)
+                self._busy.discard(request)
 
-    def close_active_requests(self):
-        with self.active_requests_lock:
-            requests = list(self.active_requests)
+    def request_started(self, conn):
+        with self._lock:
+            self._busy.add(conn)
 
-        logger.info("Closing %d active client connections", len(requests))
+    def request_done(self, conn):
+        with self._lock:
+            self._busy.discard(conn)
 
-        for conn in requests:
-            try:
-                conn.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+    def drain(self, grace=3.0):
+        self.draining.set()
+        with self._lock:
+            idle = self._conns - self._busy
+            closers = list(self._ws_closers)
+        for close in closers:
+            close()
+        for conn in idle:
+            _hard_close(conn)
 
-            try:
-                conn.close()
-            except OSError:
-                pass
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            with self._lock:
+                if not self._busy:
+                    return
+            time.sleep(0.05)
+
+        with self._lock:
+            leftovers = list(self._conns)
+        logger.info("Force-closing %d connections after %.1fs grace", len(leftovers), grace)
+        for conn in leftovers:
+            _hard_close(conn)
 
 
 def run_proxy(host, http_port, https_port, mappings, stop_event):
@@ -744,5 +775,5 @@ def run_proxy(host, http_port, https_port, mappings, stop_event):
         pass
     finally:
         # httpd.shutdown() Threading server, no need?
-        httpd.close_active_requests()
+        httpd.drain(grace=3.0)
         httpd.server_close()
