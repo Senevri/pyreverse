@@ -1,0 +1,22 @@
+[project]
+name = "pyreverse"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Esa Karjalainen", email = "esa.karjalainen@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "cryptography>=42.0",
+    "httpx2[ws]>=2.16.2",
+    "pyopenssl>=23.1",
+    "pyyaml>=6.0.4",
+]
+
+[project.scripts]
+pyreverse = "pyreverse:main"
+
+[build-system]
+requires = ["uv_build>=0.13.10,<0.14.0"]
+build-backend = "uv_build"

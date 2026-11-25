@@ -7,7 +7,7 @@ from pyreverselib import Proxy, check_port
 from mylogger import logger
 
 
-def proxy_cli(proxies):
+def proxy_cli(proxies, args):
     exit_requested = False
 
     print("Reverse Proxy Tool v1.0 by Ark")
@@ -26,8 +26,17 @@ def proxy_cli(proxies):
     print("- help: Displays available commands.")
     print("- exit: Stop all proxies and exit.")
 
+    _cmd = []
+    if args.start:
+        _cmd=["start", args.start]
+        args.start=None
+
     while True:
-        cmd = input("> ").lower().split()
+        if not _cmd:
+            cmd = input("> ").lower().split()
+        else:
+            cmd=_cmd
+            _cmd = None
 
         if len(cmd) == 0:
             continue
@@ -324,6 +333,11 @@ def update_config(proxies, config_path):
 
 
 if __name__ == "__main__":
+    from argparse import ArgumentParser
+    parser = ArgumentParser("Python reverse proxy")
+    parser.add_argument("--start", default="all")
+    args = parser.parse_args()
+
     config = configparser.ConfigParser()
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "config.ini")
@@ -342,7 +356,7 @@ if __name__ == "__main__":
 
     try:
         # Start a simple command-line interface to control proxies
-        proxy_cli(proxies)
+        proxy_cli(proxies, args)
     except KeyboardInterrupt:
         print("Shutting down proxies...")
 
