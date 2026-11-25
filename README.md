@@ -1,5 +1,5 @@
 # NOTE
-I have modified this so that it can handle subdomains, assuming they're redirected to the host.
+I have modified this so that it can handle subdomains, streaming and (in theory) websockets, assuming they're redirected to the host.
 Also it handles redirects better. Not a single file any more, though.
 
 
